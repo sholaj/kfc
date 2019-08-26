@@ -2,8 +2,6 @@ package main
 
 import (
 	"flag"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -71,7 +69,7 @@ func main() {
 }
 
 func init() {
-	flag.StringVar(&kubeconfig, "kubeconfig", filepath.Join(os.Getenv("HOME"), ".kube/config"), "Path to a kubeconfig. Only required if out-of-cluster.")
+	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
 	flag.StringVar(&masterURL, "master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
 }
 
