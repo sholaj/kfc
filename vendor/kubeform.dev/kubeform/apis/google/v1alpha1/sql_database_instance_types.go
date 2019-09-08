@@ -97,7 +97,7 @@ type SqlDatabaseInstanceSpecSettingsIpConfiguration struct {
 	// +optional
 	PrivateNetwork string `json:"privateNetwork,omitempty" tf:"private_network,omitempty"`
 	// +optional
-	RequireSsl bool `json:"requireSsl,omitempty" tf:"require_ssl,omitempty"`
+	RequireSSL bool `json:"requireSSL,omitempty" tf:"require_ssl,omitempty"`
 }
 
 type SqlDatabaseInstanceSpecSettingsLocationPreference struct {

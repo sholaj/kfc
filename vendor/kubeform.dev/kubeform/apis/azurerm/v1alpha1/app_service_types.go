@@ -188,7 +188,7 @@ type AppServiceSpecSiteConfig struct {
 	// +optional
 	ManagedPipelineMode string `json:"managedPipelineMode,omitempty" tf:"managed_pipeline_mode,omitempty"`
 	// +optional
-	MinTlsVersion string `json:"minTlsVersion,omitempty" tf:"min_tls_version,omitempty"`
+	MinTLSVersion string `json:"minTLSVersion,omitempty" tf:"min_tls_version,omitempty"`
 	// +optional
 	PhpVersion string `json:"phpVersion,omitempty" tf:"php_version,omitempty"`
 	// +optional
