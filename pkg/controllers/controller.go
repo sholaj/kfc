@@ -28,6 +28,8 @@ import (
 
 const controllerAgentName = "kfc"
 
+var SecretKey string
+
 const (
 	// SuccessSynced is used as part of the Event 'reason' when a Resource is synced
 	SuccessSynced = "Synced"
@@ -111,6 +113,8 @@ func (c *Controller) AddNewCRD(gvr schema.GroupVersionResource, dynamicClient dy
 }
 
 func (c *Controller) GetWorker(gvr schema.GroupVersionResource) *queue.Worker {
+	c.Lock()
+	defer c.Unlock()
 	return c.crdWorkers[gvr]
 }
 
@@ -159,29 +163,28 @@ func (c *Controller) reconcile(gvr schema.GroupVersionResource, key string) erro
 		return err
 	}
 
-	obj.GetKind()
-
 	// TODO: make a namer
 	resPath := filepath.Join(basePath, gvr.Resource+"."+namespace+"."+name)
 	providerFile := filepath.Join(resPath, "provider.tf.json")
 	mainFile := filepath.Join(resPath, "main.tf.json")
 	stateFile := filepath.Join(resPath, "terraform.tfstate")
+	outputFile := filepath.Join(resPath, "output.tf")
 
 	if hasFinalizer(obj.GetFinalizers(), KFCFinalizer) {
 		if obj.GetDeletionTimestamp() != nil {
 			err := terraformDestroy(resPath)
 			if err != nil {
-				log.Error(err, "failed to terraform destroy")
+				log.Error("failed to terraform destroy: ", err)
 			}
 
 			err = deleteFiles(resPath)
 			if err != nil {
-				log.Error(err, "failed to delete files")
+				log.Error("failed to delete files: ", err)
 			}
 
 			err = removeFinalizer(obj, KFCFinalizer)
 			if err != nil {
-				log.Error(err, "failed to remove finalizer")
+				log.Error("failed to remove finalizer: ", err)
 			}
 
 			c.updateResource(gvr, obj)
@@ -210,15 +213,30 @@ func (c *Controller) reconcile(gvr schema.GroupVersionResource, key string) erro
 		return fmt.Errorf("unable to fetch secret : %s", err)
 	}
 
-	providerName := strings.Split(gvr.Group, ".")[0]
+	isModule := isModule(gvr.Group)
+
+	var providerName, source string
+	if isModule {
+		providerName, source = getModuleProviderAndSource(obj.GetKind())
+	} else {
+		providerName = strings.Split(gvr.Group, ".")[0]
+	}
+
 	err = secretToTFProvider(secret, providerName, providerFile)
 	if err != nil {
 		return fmt.Errorf("unable to create provider from secret : %s", err)
 	}
 
-	err = crdToTFResource(gvr.GroupVersion(), namespace, providerName, c.kubeclientset, obj, mainFile)
-	if err != nil {
-		return fmt.Errorf("unable to get crd resource : %s", err)
+	if isModule {
+		err = crdToModule(c.kubeclientset, gvr.GroupVersion(), obj, source, mainFile, outputFile)
+		if err != nil {
+			return fmt.Errorf("unable to get crd module : %s", err)
+		}
+	} else {
+		err = crdToTFResource(gvr.GroupVersion(), namespace, providerName, c.kubeclientset, obj, mainFile)
+		if err != nil {
+			return fmt.Errorf("unable to get crd resource : %s", err)
+		}
 	}
 
 	err = terraformInit(resPath)
@@ -226,7 +244,7 @@ func (c *Controller) reconcile(gvr schema.GroupVersionResource, key string) erro
 		return fmt.Errorf("unable to initialize terraform : %s", err)
 	}
 
-	err = createTFState(c.kubeclientset, stateFile, providerName, gvr.GroupVersion(), obj)
+	err = createTFState(c.kubeclientset, stateFile, providerName, isModule, gvr.GroupVersion(), obj)
 	if err != nil {
 		return fmt.Errorf("unable to create tfstate file : %s", err)
 	}
@@ -236,14 +254,22 @@ func (c *Controller) reconcile(gvr schema.GroupVersionResource, key string) erro
 		return fmt.Errorf("unable to apply terraform : %s", err)
 	}
 
-	err = updateTFStateFile(stateFile, gvr.GroupVersion(), obj)
+	err = updateTFStateFile(stateFile, isModule, gvr.GroupVersion(), obj)
 	if err != nil {
+
 		return fmt.Errorf("unable to update TFState : %s", err)
 	}
 
-	err = updateStateField(c.kubeclientset, namespace, providerName, stateFile, gvr, obj)
-	if err != nil {
-		return fmt.Errorf("unable to update resource fields from tfstate : %s", err)
+	if !isModule {
+		err = updateStateField(c.kubeclientset, namespace, providerName, stateFile, gvr, obj)
+		if err != nil {
+			return fmt.Errorf("unable to update resource fields from tfstate : %s", err)
+		}
+	} else {
+		err = updateOutputField(c.kubeclientset, resPath, namespace, providerName, obj)
+		if err != nil {
+			return fmt.Errorf("unable to update output tfstate : %s", err)
+		}
 	}
 
 	c.updateResource(gvr, obj)

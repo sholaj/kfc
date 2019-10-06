@@ -2,6 +2,8 @@ package controllers
 
 import (
 	"bytes"
+	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -11,10 +13,13 @@ import (
 	"strconv"
 	"strings"
 
+	"ekyu.moe/base91"
 	"github.com/appscode/go/log"
 	"github.com/fatih/structs"
 	"github.com/gobuffalo/flect"
 	jsoniter "github.com/json-iterator/go"
+	"gocloud.dev/secrets"
+	_ "gocloud.dev/secrets/localsecrets"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,7 +27,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 	"kmodules.xyz/client-go/meta"
-	"kubeform.dev/kubeform/apis"
+	base "kubeform.dev/kubeform/apis/base/v1alpha1"
+	"kubeform.dev/kubeform/data"
 )
 
 const KFCFinalizer = "kfc.io"
@@ -151,6 +157,109 @@ func crdToTFResource(gv schema.GroupVersion, namespace, providerName string, kub
 	return nil
 }
 
+func crdToModule(kc kubernetes.Interface, gv schema.GroupVersion, obj *unstructured.Unstructured, source, mainFile, outputFile string) error {
+	moduleName := obj.GetName()
+	err := unstructured.SetNestedField(obj.Object, source, "spec", "source")
+	if err != nil {
+		return err
+	}
+
+	data, err := meta.MarshalToJson(obj, gv)
+	if err != nil {
+		return err
+	}
+
+	typedObj, err := meta.UnmarshalFromJSON(data, gv)
+	if err != nil {
+		return err
+	}
+
+	typedStruct := structs.New(typedObj)
+	spec := reflect.ValueOf(typedStruct.Field("Spec").Value())
+	specType := reflect.TypeOf(typedStruct.Field("Spec").Value())
+	specValue := reflect.New(specType)
+	specValue.Elem().Set(spec)
+	jsonit := jsoniter.Config{
+		EscapeHTML:             true,
+		SortMapKeys:            true,
+		ValidateJsonRawMessage: true,
+		TagKey:                 "tf",
+	}.Froze()
+
+	secretRef, _, err := unstructured.NestedFieldNoCopy(obj.Object, "spec", "secretRef")
+	if err != nil {
+		return err
+	}
+
+	if secretRef != nil {
+		secretName := typedStruct.Field("Spec").Field("SecretRef").Field("Name").Value()
+		if secretName != nil {
+			secret, err := kc.CoreV1().Secrets(obj.GetNamespace()).Get(secretName.(string), v1.GetOptions{})
+			if err != nil {
+				return err
+			}
+
+			for key := range secret.Data {
+				val := secret.Data[key]
+
+				tempMap := make(map[string]string)
+				buffer := new(bytes.Buffer)
+				var secretData interface{}
+
+				if err := json.Compact(buffer, val); err != nil {
+					secretData = strings.ReplaceAll(string(val), "\n", "")
+				} else {
+					err = json.Unmarshal(buffer.Bytes(), &tempMap)
+					if err != nil {
+						return err
+					}
+					secretData = tempMap
+				}
+
+				specValue.Elem().FieldByName(flect.Capitalize(flect.Camelize(key))).Set(reflect.ValueOf(secretData))
+			}
+		}
+	}
+
+	str, err := jsonit.Marshal(specValue.Interface())
+	if err != nil {
+		return err
+	}
+
+	moduleData :=
+		[]byte(`{"module":{ "` + moduleName + `":`)
+
+	moduleData = append(moduleData, str...)
+	moduleData = append(moduleData, []byte("} }")...)
+	prettyData, err := prettyJSON(moduleData)
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile(mainFile, prettyData, 0644)
+	if err != nil {
+		return err
+	}
+
+	outputData := []byte(``)
+	output := reflect.TypeOf(typedStruct.Field("Status").Field("Output").Value()).Elem()
+
+	for i := 0; i < output.NumField(); i++ {
+		field := output.Field(i).Tag.Get("tf")
+		outputData = append(outputData, []byte(`output "`+field+`" { 
+value = module.`+moduleName+`.`+field+` 
+}
+`)...)
+	}
+
+	err = ioutil.WriteFile(outputFile, outputData, 0644)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func updateStateField(kc kubernetes.Interface, namespace, providerName, filePath string, gvr schema.GroupVersionResource, obj *unstructured.Unstructured) error {
 	gv := gvr.GroupVersion()
 	stateJson, err := ioutil.ReadFile(filePath)
@@ -223,7 +332,7 @@ func updateStateField(kc kubernetes.Interface, namespace, providerName, filePath
 						Name:      secretName,
 						Namespace: namespace,
 					},
-					Type: corev1.SecretType("kfc.io/" + providerName),
+					Type: corev1.SecretType("kubeform.com/" + providerName),
 				})
 				if err != nil {
 					return err
@@ -248,6 +357,81 @@ func updateStateField(kc kubernetes.Interface, namespace, providerName, filePath
 	err = setNestedFieldNoCopy(obj.Object, s.Field("Spec").Value(), "status", "output")
 	if err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func updateOutputField(kc kubernetes.Interface, respath, namespace, providerName string, obj *unstructured.Unstructured) error {
+	value, err := terraformOutput(respath)
+	if err != nil {
+		return err
+	}
+
+	secretData := make(map[string][]byte)
+
+	outputs := make(map[string]output)
+
+	err = json.Unmarshal([]byte(value), &outputs)
+	if err != nil {
+		return err
+	}
+
+	for name, output := range outputs {
+		val, err := output.ValueRaw.MarshalJSON()
+		if err != nil {
+			return err
+		}
+		if !output.Sensitive {
+			err = setNestedFieldNoCopy(obj.Object, string(val), "status", "output", flect.Camelize(name))
+			if err != nil {
+				return err
+			}
+		} else {
+			secretData[name] = output.ValueRaw
+		}
+	}
+
+	if len(secretData) != 0 {
+		var secretName interface{}
+
+		secretRef, _, err := unstructured.NestedFieldNoCopy(obj.Object, "spec", "secretRef")
+		if err != nil {
+			return err
+		}
+
+		if secretRef != nil {
+			secretName, _, _ = unstructured.NestedFieldNoCopy(obj.Object, "spec", "secretRef", "name")
+		} else {
+			secretName = obj.GetName() + "-" + obj.GetNamespace() + "-" + "sensitive"
+		}
+
+		var secret *corev1.Secret
+		secret, err = kc.CoreV1().Secrets(namespace).Get(secretName.(string), v1.GetOptions{})
+		if err != nil {
+			if errors.ReasonForError(err) == v1.StatusReasonNotFound {
+				_, err = kc.CoreV1().Secrets(namespace).Create(&corev1.Secret{
+					ObjectMeta: v1.ObjectMeta{
+						Name:      secretName.(string),
+						Namespace: namespace,
+					},
+					Type: corev1.SecretType("kubeform.com/" + providerName),
+				})
+				if err != nil {
+					return err
+				}
+			}
+			return err
+		}
+
+		for key := range secretData {
+			secret.Data[key] = secretData[key]
+		}
+
+		_, err = kc.CoreV1().Secrets(namespace).Update(secret)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -337,7 +521,8 @@ func prettyJSON(byteJson []byte) ([]byte, error) {
 	return prettyJSON.Bytes(), err
 }
 
-func createTFState(kc kubernetes.Interface, filePath, providerName string, gv schema.GroupVersion, u *unstructured.Unstructured) error {
+func createTFState(kc kubernetes.Interface, filePath, providerName string, isModule bool, gv schema.GroupVersion, u *unstructured.Unstructured) error {
+
 	resourceName := providerName + "_" + flect.Underscore(u.GetKind())
 	_, existErr := os.Stat(filePath)
 
@@ -353,9 +538,24 @@ func createTFState(kc kubernetes.Interface, filePath, providerName string, gv sc
 
 	typedStruct := structs.New(typedObj)
 	stateValue := typedStruct.Field("Status").Field("State").Value()
+	if isModule {
+		if os.IsNotExist(existErr) && stateValue.(string) != "" {
+			decodedData, err := decodeState(stateValue.(string))
+			if err != nil {
+				return err
+			}
+
+			err = ioutil.WriteFile(filePath, decodedData, 0644)
+			if err != nil {
+				return fmt.Errorf("failed to write file hash : %s", err.Error())
+			}
+		}
+
+		return nil
+	}
 	outputValue := reflect.ValueOf(typedStruct.Field("Status").Field("Output").Value())
 
-	if os.IsNotExist(existErr) && stateValue.(*apis.State) != nil {
+	if os.IsNotExist(existErr) && stateValue.(*base.State) != nil {
 		stateData, err := json.Marshal(stateValue)
 		if err != nil {
 			return err
@@ -461,14 +661,8 @@ func createTFState(kc kubernetes.Interface, filePath, providerName string, gv sc
 	return nil
 }
 
-func updateTFStateFile(filePath string, gv schema.GroupVersion, u *unstructured.Unstructured) error {
+func updateTFStateFile(filePath string, isModule bool, gv schema.GroupVersion, u *unstructured.Unstructured) error {
 	data, err := ioutil.ReadFile(filePath)
-	if err != nil {
-		return err
-	}
-
-	var tfstate *apis.State
-	err = json.Unmarshal(data, &tfstate)
 	if err != nil {
 		return err
 	}
@@ -485,7 +679,27 @@ func updateTFStateFile(filePath string, gv schema.GroupVersion, u *unstructured.
 	typedStruct := structs.New(typedObj)
 	stateValue := typedStruct.Field("Status").Field("State").Value()
 
-	if stateValue.(*apis.State) == nil || stateValue.(*apis.State).Serial != tfstate.Serial {
+	if isModule {
+		if stateValue.(string) == "" || !reflect.DeepEqual([]byte(stateValue.(string)), data) {
+			processedData, err := encodeState(data)
+			if err != nil {
+				return err
+			}
+
+			err = setNestedFieldNoCopy(u.Object, processedData, "status", "state")
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	var tfstate *base.State
+	err = json.Unmarshal(data, &tfstate)
+	if err != nil {
+		return err
+	}
+
+	if stateValue.(*base.State) == nil || stateValue.(*base.State).Serial != tfstate.Serial {
 		err = setNestedFieldNoCopy(u.Object, tfstate, "status", "state")
 		if err != nil {
 			return err
@@ -556,4 +770,83 @@ func processSensitiveFields(r reflect.Type, v reflect.Value, tfkey string, data 
 			}
 		}
 	}
+}
+
+func isModule(group string) bool {
+	s := strings.Split(group, ".")
+
+	return s[0] == "modules"
+}
+
+func encodeState(data []byte) (string, error) {
+	// zip
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+
+	if _, err := zw.Write(data); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := zw.Close(); err != nil {
+		log.Fatal(err)
+	}
+
+	// encrypt
+	savedKeyKeeper, err := secrets.OpenKeeper(context.Background(), "base64key://"+SecretKey)
+	if err != nil {
+		return "", err
+	}
+	defer savedKeyKeeper.Close()
+
+	cipherText, err := savedKeyKeeper.Encrypt(context.Background(), buf.Bytes())
+	if err != nil {
+		return "", err
+	}
+
+	// base91
+
+	return base91.EncodeToString(cipherText), nil
+}
+
+func decodeState(data string) ([]byte, error) {
+	cipherText := base91.DecodeString(data)
+
+	savedKeyKeeper, err := secrets.OpenKeeper(context.Background(), "base64key://"+SecretKey)
+	if err != nil {
+		return nil, err
+	}
+	defer savedKeyKeeper.Close()
+
+	plainText, err := savedKeyKeeper.Decrypt(context.Background(), cipherText)
+	if err != nil {
+		return nil, err
+	}
+
+	buf := bytes.NewBuffer(plainText)
+
+	zr, err := gzip.NewReader(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := ioutil.ReadAll(zr)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := zr.Close(); err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
+func getModuleProviderAndSource(name string) (string, string) {
+	for _, moduleConfig := range data.ModuleConfig {
+		if moduleConfig.Name == name {
+			return moduleConfig.Provider, moduleConfig.Source
+		}
+	}
+
+	return "", ""
 }
