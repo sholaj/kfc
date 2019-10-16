@@ -92,7 +92,7 @@ func (c *Controller) AddNewCRD(gvr schema.GroupVersionResource, dynamicClient dy
 		return c.reconcile(gvr, key)
 	})
 
-	i.Informer().AddEventHandler(queue.DefaultEventHandler(q.GetQueue()))
+	i.Informer().AddEventHandler(queue.NewReconcilableHandler(q.GetQueue()))
 
 	c.crdListers[gvr] = dynamiclister.New(i.Informer().GetIndexer(), gvr)
 	c.crdWorkers[gvr] = q
@@ -195,6 +195,13 @@ func (c *Controller) reconcile(gvr schema.GroupVersionResource, key string) erro
 		if err != nil {
 			return fmt.Errorf("failed to add finalizer : %s", err)
 		}
+		c.updateResource(gvr, obj)
+
+		return nil
+	}
+
+	if obj.GetDeletionTimestamp() != nil {
+		return nil
 	}
 
 	err = createFiles(resPath, providerFile, mainFile)
@@ -272,7 +279,13 @@ func (c *Controller) reconcile(gvr schema.GroupVersionResource, key string) erro
 		}
 	}
 
-	c.updateResource(gvr, obj)
+	err = unstructured.SetNestedField(obj.Object, obj.GetGeneration(), "status", "observedGeneration")
+	if err != nil {
+		log.Error(err, "failed to update observed generation field")
+		return nil
+	}
+
+	c.updateStatus(gvr, obj)
 
 	c.recorder.Event(obj, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
 	return nil
@@ -280,6 +293,13 @@ func (c *Controller) reconcile(gvr schema.GroupVersionResource, key string) erro
 
 func (c *Controller) updateResource(gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
 	_, err := c.dynamicclient.Resource(gvr).Namespace(u.GetNamespace()).Update(u, metav1.UpdateOptions{})
+	if err != nil {
+		klog.Errorf("failed to update resource, reason : %s", err.Error())
+	}
+}
+
+func (c *Controller) updateStatus(gvr schema.GroupVersionResource, u *unstructured.Unstructured) {
+	_, err := c.dynamicclient.Resource(gvr).Namespace(u.GetNamespace()).UpdateStatus(u, metav1.UpdateOptions{})
 	if err != nil {
 		klog.Errorf("failed to update resource, reason : %s", err.Error())
 	}
