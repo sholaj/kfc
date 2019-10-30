@@ -47,8 +47,8 @@ endif
 ### These variables should not need tweaking.
 ###
 
-SRC_PKGS := pkg
-SRC_DIRS := $(SRC_PKGS) *.go # directories which hold app source (not vendored)
+SRC_PKGS := pkg *.go
+SRC_DIRS := $(SRC_PKGS) test # directories which hold app source (not vendored)
 
 DOCKER_PLATFORMS := linux/amd64 linux/arm linux/arm64
 BIN_PLATFORMS    := $(DOCKER_PLATFORMS)
@@ -86,6 +86,8 @@ BUILD_DIRS  := bin/$(OS)_$(ARCH)     \
 
 DOCKERFILE_PROD  = Dockerfile.in
 DOCKERFILE_DBG   = Dockerfile.dbg
+
+DOCKER_REPO_ROOT := /go/src/$(GO_PKG)/$(REPO)
 
 # If you want to build all binaries, see the 'all-build' rule.
 # If you want to build all containers, see the 'all-container' rule.
@@ -333,12 +335,18 @@ $(BUILD_DIRS):
 install:
 	@cd ../installer; \
 	helm init --client-only; \
+	kubectl apply -f https://raw.githubusercontent.com/kubeform/kubeform/master/api/crds/google.kubeform.com_serviceaccounts.yaml; \
+	kubectl apply -f https://raw.githubusercontent.com/kubeform/kubeform/master/api/crds/aws.kubeform.com_dbinstances.yaml; \
+	kubectl apply -f https://raw.githubusercontent.com/kubeform/kubeform/master/api/crds/digitalocean.kubeform.com_databaseclusters.yaml; \
+	kubectl apply -f https://raw.githubusercontent.com/kubeform/kubeform/master/api/crds/linode.kubeform.com_instances.yaml; \
+	kubectl apply -f https://raw.githubusercontent.com/kubeform/kubeform/master/api/crds/azurerm.kubeform.com_rediscaches.yaml; \
+	kubectl apply -f https://raw.githubusercontent.com/kubeform/kubeform/master/api/crds/modules.kubeform.com_googleserviceaccounts.yaml; \
 	helm template ./chart/kubeform \
 		--name kfc \
 		--namespace kube-system \
 		--set operator.registry=$(REGISTRY) \
 		--set operator.tag=$(TAG) \
-		--set secretKey="$$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 31 | head -n 1 | base64)" | kubectl apply -f -
+		--set secretKey=MUViUENaR3ZKVm9TSEMxVFVob0ZnRDZnWjk2R1FNTgo= | kubectl apply -f -
 
 .PHONY: uninstall
 uninstall:
@@ -371,8 +379,34 @@ verify-gen: gen fmt
 		echo "files are out of date, run make gen fmt"; exit 1; \
 	fi
 
+.PHONY: add-license
+add-license:
+	@echo "Adding license header"
+	@docker run --rm 	                                 \
+		-u $$(id -u):$$(id -g)                           \
+		-v /tmp:/.cache                                  \
+		-v $$(pwd):$(DOCKER_REPO_ROOT)                   \
+		-w $(DOCKER_REPO_ROOT)                           \
+		--env HTTP_PROXY=$(HTTP_PROXY)                   \
+		--env HTTPS_PROXY=$(HTTPS_PROXY)                 \
+		$(BUILD_IMAGE)                                   \
+		ltag -t "./hack/license" --excludes "vendor contrib" -v
+
+.PHONY: check-license
+check-license:
+	@echo "Checking files for license header"
+	@docker run --rm 	                                 \
+		-u $$(id -u):$$(id -g)                           \
+		-v /tmp:/.cache                                  \
+		-v $$(pwd):$(DOCKER_REPO_ROOT)                   \
+		-w $(DOCKER_REPO_ROOT)                           \
+		--env HTTP_PROXY=$(HTTP_PROXY)                   \
+		--env HTTPS_PROXY=$(HTTPS_PROXY)                 \
+		$(BUILD_IMAGE)                                   \
+		ltag -t "./hack/license" --excludes "vendor contrib" --check -v
+
 .PHONY: ci
-ci: lint build unit-tests #cover
+ci: verify check-license lint unit-tests #build cover
 
 .PHONY: qa
 qa:
