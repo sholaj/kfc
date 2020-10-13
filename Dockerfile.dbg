@@ -22,6 +22,7 @@ RUN apt-get update \
   && apt-get -y install curl unzip git \
   && curl -O -L https://releases.hashicorp.com/terraform/{TERRAFORM_VER}/terraform_{TERRAFORM_VER}_{ARG_OS}_{ARG_ARCH}.zip \
   && unzip terraform_{TERRAFORM_VER}_{ARG_OS}_{ARG_ARCH}.zip \
+  && chmod 755 terraform \
   && mv terraform /bin/terraform
 
 ENTRYPOINT ["/{ARG_BIN}"]

@@ -19,7 +19,7 @@ RUN apt-get update \
   && apt-get -y install unzip \
   && curl -O -L https://releases.hashicorp.com/terraform/{TERRAFORM_VER}/terraform_{TERRAFORM_VER}_{ARG_OS}_{ARG_ARCH}.zip \
   && unzip terraform_{TERRAFORM_VER}_{ARG_OS}_{ARG_ARCH}.zip \
-  && mv terraform /bin/terraform
+  && chmod 755 terraform
 
 
 
@@ -35,7 +35,7 @@ ENV TZ     :/etc/localtime
 ENV LANG   en_US.utf8
 
 COPY bin/{ARG_OS}_{ARG_ARCH}/{ARG_BIN} /{ARG_BIN}
-COPY --from=0 /bin/terraform /bin/terraform
+COPY --from=0 terraform /bin/terraform
 
 # This would be nicer as `nobody:nobody` but distroless has no such entries.
 # USER 65535:65535
