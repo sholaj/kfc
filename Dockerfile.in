@@ -16,7 +16,9 @@ FROM debian:buster
 
 RUN set -x \
   && apt-get update \
-  && apt-get install -y --no-install-recommends apt-transport-https ca-certificates curl unzip \
+  && apt-get install -y --no-install-recommends apt-transport-https ca-certificates curl unzip
+
+RUN set -x \
   && curl -O -fsSL https://releases.hashicorp.com/terraform/{TERRAFORM_VER}/terraform_{TERRAFORM_VER}_{ARG_OS}_{ARG_ARCH}.zip \
   && unzip terraform_{TERRAFORM_VER}_{ARG_OS}_{ARG_ARCH}.zip \
   && chmod 755 terraform
