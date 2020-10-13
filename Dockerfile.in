@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM debian:stretch
+FROM debian:buster
 
 RUN apt-get update \
   && apt-get -y install curl \
   && apt-get -y install unzip \
-  && curl -O -L https://releases.hashicorp.com/terraform/0.12.4/terraform_0.12.4_linux_amd64.zip \
-  && unzip terraform_0.12.4_linux_amd64.zip \
+  && curl -O -L https://releases.hashicorp.com/terraform/{TERRAFORM_VER}/terraform_{TERRAFORM_VER}_{ARG_OS}_{ARG_ARCH}.zip \
+  && unzip terraform_{TERRAFORM_VER}_{ARG_OS}_{ARG_ARCH}.zip \
   && mv terraform /bin/terraform
 
 
