@@ -19,7 +19,7 @@ LABEL org.opencontainers.image.source https://github.com/kubeform/kfc
 ADD bin/{ARG_OS}_{ARG_ARCH}/{ARG_BIN} /{ARG_BIN}
 
 RUN apt-get update \
-  && apt-get -y install curl unzip git \
+  && apt-get install -y --no-install-recommends apt-transport-https ca-certificates curl unzip git \
   && curl -O -L https://releases.hashicorp.com/terraform/{TERRAFORM_VER}/terraform_{TERRAFORM_VER}_{ARG_OS}_{ARG_ARCH}.zip \
   && unzip terraform_{TERRAFORM_VER}_{ARG_OS}_{ARG_ARCH}.zip \
   && chmod 755 terraform \
